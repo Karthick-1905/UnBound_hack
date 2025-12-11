@@ -89,7 +89,7 @@ pip install -r requirements.txt
 
 ---
 
-## 🎯 Usage
+## Usage
 
 ### Starting the Backend Server
 
