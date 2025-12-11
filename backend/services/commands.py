@@ -271,15 +271,73 @@ def submit_command(user_id: str, command_text: str, username: str) -> Command:
                     (user_id, command_text, matched_rule_id),
                 )
                 record = cursor.fetchone()
+                command_id = record[0]
+                
+                # Get user tier for threshold calculation
+                cursor.execute(
+                    "SELECT user_tier FROM users WHERE id = %s::uuid;",
+                    (user_id,)
+                )
+                user_tier = cursor.fetchone()[0]
+                
+                # Calculate required approvals based on user tier and rule settings
+                from services.approval_voting import calculate_required_approvals
+                if matched_rule:
+                    required_approvals = calculate_required_approvals(
+                        user_tier, 
+                        matched_rule.user_tier_thresholds,
+                        matched_rule.approval_threshold
+                    )
+                else:
+                    # Default if no rule matched
+                    tier_defaults = {"junior": 3, "mid": 2, "senior": 1, "lead": 1}
+                    required_approvals = tier_defaults.get(user_tier, 2)
+                
+                # Create approval request
+                from services.approvals import create_approval_request, mark_notified
+                approval_request = create_approval_request(
+                    command_id=command_id,
+                    requested_by=user_id,
+                    required_approvals=required_approvals
+                )
+                
+                # Get all admin emails
+                from services.users import get_all_admin_emails
+                admin_emails = get_all_admin_emails()
+                
+                # Send email notifications to all admins
+                if admin_emails:
+                    try:
+                        from services.notifications import send_approval_request_email
+                        send_approval_request_email(
+                            to_emails=admin_emails,
+                            command_text=command_text,
+                            requested_by=username,
+                            approval_request_id=approval_request.id,
+                            command_id=command_id
+                        )
+                        mark_notified(approval_request.id)
+                    except Exception as email_exc:
+                        # Log but don't fail the command submission
+                        print(f"Warning: Failed to send approval email: {email_exc}")
                 
                 # Log audit entry
                 log_audit_entry(
                     user_id=user_id,
                     action_type="COMMAND_PENDING_APPROVAL",
                     resource_type="command",
-                    resource_id=record[0],
-                    new_values={"command_text": command_text, "status": "NEEDS_APPROVAL"},
-                    metadata={"username": username, "matched_rule_id": matched_rule_id},
+                    resource_id=command_id,
+                    new_values={
+                        "command_text": command_text, 
+                        "status": "NEEDS_APPROVAL",
+                        "required_approvals": required_approvals
+                    },
+                    metadata={
+                        "username": username, 
+                        "matched_rule_id": matched_rule_id,
+                        "user_tier": user_tier,
+                        "approval_request_id": approval_request.id
+                    },
                     connection=connection
                 )
                 

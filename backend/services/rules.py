@@ -20,6 +20,8 @@ class Rule:
     pattern: str
     action: str
     description: Optional[str]
+    approval_threshold: int
+    user_tier_thresholds: dict
     created_at: str
     updated_at: str
     is_active: bool
@@ -56,7 +58,9 @@ def validate_regex_pattern(pattern: str) -> None:
 def create_rule(
     pattern: str,
     action: str,
-    description: Optional[str] = None
+    description: Optional[str] = None,
+    approval_threshold: int = 1,
+    user_tier_thresholds: Optional[dict] = None
 ) -> Rule:
    
     validate_regex_pattern(pattern)
@@ -66,17 +70,22 @@ def create_rule(
     if action not in valid_actions:
         raise RuleValidationError(f"Invalid action: {action}. Must be one of {valid_actions}")
     
+    # Default user tier thresholds
+    if user_tier_thresholds is None:
+        user_tier_thresholds = {"junior": 3, "mid": 2, "senior": 1, "lead": 1}
+    
+    import json
     connection = get_db_connection()
     try:
         with connection.cursor() as cursor:
             cursor.execute(
                 """
-                INSERT INTO rules (pattern, action, description)
-                VALUES (%s, %s, %s)
-                RETURNING id::text, pattern, action, description, 
-                          created_at::text, updated_at::text, is_active;
+                INSERT INTO rules (pattern, action, description, approval_threshold, user_tier_thresholds)
+                VALUES (%s, %s, %s, %s, %s::jsonb)
+                RETURNING id::text, pattern, action, description, approval_threshold,
+                          user_tier_thresholds::text, created_at::text, updated_at::text, is_active;
                 """,
-                (pattern, action, description),
+                (pattern, action, description, approval_threshold, json.dumps(user_tier_thresholds)),
             )
             record = cursor.fetchone()
         connection.commit()
@@ -94,9 +103,11 @@ def create_rule(
         pattern=record[1],
         action=record[2],
         description=record[3],
-        created_at=record[4],
-        updated_at=record[5],
-        is_active=record[6],
+        approval_threshold=record[4],
+        user_tier_thresholds=json.loads(record[5]),
+        created_at=record[6],
+        updated_at=record[7],
+        is_active=record[8],
     )
 
 
@@ -112,14 +123,15 @@ def list_rules(active_only: bool = True) -> List[Rule]:
     Raises:
         RuleLookupError: If lookup fails
     """
+    import json
     connection = get_db_connection()
     try:
         with connection.cursor() as cursor:
             if active_only:
                 cursor.execute(
                     """
-                    SELECT id::text, pattern, action, description, 
-                           created_at::text, updated_at::text, is_active
+                    SELECT id::text, pattern, action, description, approval_threshold,
+                           user_tier_thresholds::text, created_at::text, updated_at::text, is_active
                     FROM rules
                     WHERE is_active = TRUE
                     ORDER BY created_at ASC;
@@ -128,8 +140,8 @@ def list_rules(active_only: bool = True) -> List[Rule]:
             else:
                 cursor.execute(
                     """
-                    SELECT id::text, pattern, action, description, 
-                           created_at::text, updated_at::text, is_active
+                    SELECT id::text, pattern, action, description, approval_threshold,
+                           user_tier_thresholds::text, created_at::text, updated_at::text, is_active
                     FROM rules
                     ORDER BY created_at ASC;
                     """
@@ -146,9 +158,11 @@ def list_rules(active_only: bool = True) -> List[Rule]:
             pattern=record[1],
             action=record[2],
             description=record[3],
-            created_at=record[4],
-            updated_at=record[5],
-            is_active=record[6],
+            approval_threshold=record[4],
+            user_tier_thresholds=json.loads(record[5]),
+            created_at=record[6],
+            updated_at=record[7],
+            is_active=record[8],
         )
         for record in records
     ]
@@ -166,13 +180,14 @@ def get_rule_by_id(rule_id: str) -> Optional[Rule]:
     Raises:
         RuleLookupError: If lookup fails
     """
+    import json
     connection = get_db_connection()
     try:
         with connection.cursor() as cursor:
             cursor.execute(
                 """
-                SELECT id::text, pattern, action, description, 
-                       created_at::text, updated_at::text, is_active
+                SELECT id::text, pattern, action, description, approval_threshold,
+                       user_tier_thresholds::text, created_at::text, updated_at::text, is_active
                 FROM rules
                 WHERE id = %s::uuid;
                 """,
@@ -192,9 +207,11 @@ def get_rule_by_id(rule_id: str) -> Optional[Rule]:
         pattern=record[1],
         action=record[2],
         description=record[3],
-        created_at=record[4],
-        updated_at=record[5],
-        is_active=record[6],
+        approval_threshold=record[4],
+        user_tier_thresholds=json.loads(record[5]),
+        created_at=record[6],
+        updated_at=record[7],
+        is_active=record[8],
     )
 
 
@@ -203,7 +220,9 @@ def update_rule(
     pattern: Optional[str] = None,
     action: Optional[str] = None,
     description: Optional[str] = None,
-    is_active: Optional[bool] = None
+    is_active: Optional[bool] = None,
+    approval_threshold: Optional[int] = None,
+    user_tier_thresholds: Optional[dict] = None
 ) -> Rule:
     """Update a rule.
     
@@ -213,6 +232,8 @@ def update_rule(
         action: New action
         description: New description
         is_active: New active status
+        approval_threshold: New approval threshold
+        user_tier_thresholds: New user tier thresholds
         
     Returns:
         Updated Rule object
@@ -232,6 +253,7 @@ def update_rule(
             raise RuleValidationError(f"Invalid action: {action}. Must be one of {valid_actions}")
     
     # Build dynamic update query
+    import json
     updates = []
     params = []
     
@@ -247,6 +269,12 @@ def update_rule(
     if is_active is not None:
         updates.append("is_active = %s")
         params.append(is_active)
+    if approval_threshold is not None:
+        updates.append("approval_threshold = %s")
+        params.append(approval_threshold)
+    if user_tier_thresholds is not None:
+        updates.append("user_tier_thresholds = %s::jsonb")
+        params.append(json.dumps(user_tier_thresholds))
     
     if not updates:
         raise RuleUpdateError("No fields to update")
@@ -261,8 +289,8 @@ def update_rule(
                 UPDATE rules
                 SET {', '.join(updates)}
                 WHERE id = %s::uuid
-                RETURNING id::text, pattern, action, description, 
-                          created_at::text, updated_at::text, is_active;
+                RETURNING id::text, pattern, action, description, approval_threshold,
+                          user_tier_thresholds::text, created_at::text, updated_at::text, is_active;
             """
             cursor.execute(query, params)
             record = cursor.fetchone()
@@ -276,14 +304,17 @@ def update_rule(
     if record is None:
         raise RuleUpdateError("Rule not found or update failed")
     
+    import json
     return Rule(
         id=record[0],
         pattern=record[1],
         action=record[2],
         description=record[3],
-        created_at=record[4],
-        updated_at=record[5],
-        is_active=record[6],
+        approval_threshold=record[4],
+        user_tier_thresholds=json.loads(record[5]),
+        created_at=record[6],
+        updated_at=record[7],
+        is_active=record[8],
     )
 
 

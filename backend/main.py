@@ -63,7 +63,11 @@ app = FastAPI(title="UnBound Command Gateway", version="0.1.0")
 def create_user_endpoint(payload: UserCreateRequest) -> UserCreateResponse:
 	"""Create a new user and return their API key (shown only once)."""
 	try:
-		user_record, api_key = create_user(payload.username, payload.email)
+		user_record, api_key = create_user(
+			payload.username, 
+			payload.email, 
+			user_tier=payload.user_tier or "junior"
+		)
 	except UsernameAlreadyExistsError as exc:
 		raise HTTPException(status_code=409, detail="Username already exists") from exc
 	except UserCreationError as exc:
@@ -85,6 +89,7 @@ def get_current_user(user: CreatedUser = Depends(require_api_key)) -> UserProfil
 		id=user.id,
 		username=user.username,
 		role=user.role,
+		user_tier=user.user_tier,
 		credit_balance=user.credit_balance,
 	)
 
@@ -128,6 +133,8 @@ def list_rules(
 			pattern=rule.pattern,
 			action=rule.action,
 			description=rule.description,
+			approval_threshold=rule.approval_threshold,
+			user_tier_thresholds=rule.user_tier_thresholds,
 			created_at=rule.created_at,
 			updated_at=rule.updated_at,
 			is_active=rule.is_active,
@@ -147,6 +154,8 @@ def create_rule(
 			pattern=payload.pattern,
 			action=payload.action,
 			description=payload.description,
+			approval_threshold=payload.approval_threshold or 1,
+			user_tier_thresholds=payload.user_tier_thresholds,
 		)
 	except RuleValidationError as exc:
 		raise HTTPException(status_code=422, detail=str(exc)) from exc
@@ -158,6 +167,8 @@ def create_rule(
 		pattern=rule.pattern,
 		action=rule.action,
 		description=rule.description,
+		approval_threshold=rule.approval_threshold,
+		user_tier_thresholds=rule.user_tier_thresholds,
 		created_at=rule.created_at,
 		updated_at=rule.updated_at,
 		is_active=rule.is_active,
@@ -183,6 +194,8 @@ def get_rule(
 		pattern=rule.pattern,
 		action=rule.action,
 		description=rule.description,
+		approval_threshold=rule.approval_threshold,
+		user_tier_thresholds=rule.user_tier_thresholds,
 		created_at=rule.created_at,
 		updated_at=rule.updated_at,
 		is_active=rule.is_active,
@@ -203,6 +216,8 @@ def update_rule(
 			action=payload.action,
 			description=payload.description,
 			is_active=payload.is_active,
+			approval_threshold=payload.approval_threshold,
+			user_tier_thresholds=payload.user_tier_thresholds,
 		)
 	except RuleValidationError as exc:
 		raise HTTPException(status_code=422, detail=str(exc)) from exc
@@ -214,6 +229,8 @@ def update_rule(
 		pattern=rule.pattern,
 		action=rule.action,
 		description=rule.description,
+		approval_threshold=rule.approval_threshold,
+		user_tier_thresholds=rule.user_tier_thresholds,
 		created_at=rule.created_at,
 		updated_at=rule.updated_at,
 		is_active=rule.is_active,
@@ -412,6 +429,322 @@ def get_audit_log(
 		user_agent=log.user_agent,
 		created_at=log.created_at,
 	)
+
+
+# Approval endpoints
+from services.approvals import (
+	list_approval_requests,
+	get_approval_request_by_id,
+	ApprovalRequestError,
+	ApprovalRequestNotFoundError,
+)
+from services.approval_voting import (
+	cast_vote,
+	get_votes_for_request,
+	check_threshold_met,
+	has_rejection_vote,
+	get_admin_vote,
+	DuplicateVoteError,
+	ApprovalVotingError,
+)
+from services.notifications import send_approval_decision_email
+from models import ApprovalRequestResponse, ApprovalVoteRequest, ApprovalVoteResponse
+
+
+@app.get("/approvals", response_model=List[ApprovalRequestResponse])
+def list_approvals(
+	status: Optional[str] = Query(None, description="Filter by status (PENDING, APPROVED, REJECTED, EXPIRED)"),
+	limit: int = Query(50, ge=1, le=200),
+	_admin: CreatedUser = Depends(require_admin)
+) -> List[ApprovalRequestResponse]:
+	"""List approval requests (admin only)."""
+	try:
+		requests = list_approval_requests(status=status, limit=limit)
+	except ApprovalRequestError as exc:
+		raise HTTPException(status_code=500, detail="Failed to list approval requests") from exc
+	
+	return [
+		ApprovalRequestResponse(
+			id=req.id,
+			command_id=req.command_id,
+			requested_by=req.requested_by,
+			required_approvals=req.required_approvals,
+			current_approvals=req.current_approvals,
+			status=req.status,
+			rejection_reason=req.rejection_reason,
+			notified_at=req.notified_at,
+			expires_at=req.expires_at,
+			created_at=req.created_at,
+			updated_at=req.updated_at,
+		)
+		for req in requests
+	]
+
+
+@app.get("/approvals/{approval_id}", response_model=ApprovalRequestResponse)
+def get_approval(
+	approval_id: str,
+	_admin: CreatedUser = Depends(require_admin)
+) -> ApprovalRequestResponse:
+	"""Get a specific approval request (admin only)."""
+	try:
+		req = get_approval_request_by_id(approval_id)
+	except ApprovalRequestError as exc:
+		raise HTTPException(status_code=500, detail="Failed to get approval request") from exc
+	
+	if req is None:
+		raise HTTPException(status_code=404, detail="Approval request not found")
+	
+	return ApprovalRequestResponse(
+		id=req.id,
+		command_id=req.command_id,
+		requested_by=req.requested_by,
+		required_approvals=req.required_approvals,
+		current_approvals=req.current_approvals,
+		status=req.status,
+		rejection_reason=req.rejection_reason,
+		notified_at=req.notified_at,
+		expires_at=req.expires_at,
+		created_at=req.created_at,
+		updated_at=req.updated_at,
+	)
+
+
+@app.post("/approvals/{approval_id}/vote", response_model=ApprovalVoteResponse)
+def vote_on_approval(
+	approval_id: str,
+	payload: ApprovalVoteRequest,
+	admin: CreatedUser = Depends(require_admin)
+) -> ApprovalVoteResponse:
+	"""Cast a vote on an approval request (admin only)."""
+	
+	# Check if admin already voted
+	try:
+		existing_vote = get_admin_vote(approval_id, admin.id)
+		if existing_vote:
+			raise HTTPException(
+				status_code=409, 
+				detail=f"You have already voted {existing_vote.vote} on this request"
+			)
+	except ApprovalVotingError as exc:
+		raise HTTPException(status_code=500, detail=str(exc)) from exc
+	
+	# Get the approval request
+	try:
+		approval_req = get_approval_request_by_id(approval_id)
+		if not approval_req:
+			raise HTTPException(status_code=404, detail="Approval request not found")
+		
+		if approval_req.status != 'PENDING':
+			raise HTTPException(
+				status_code=400, 
+				detail=f"Cannot vote on {approval_req.status} request"
+			)
+	except ApprovalRequestError as exc:
+		raise HTTPException(status_code=500, detail=str(exc)) from exc
+	
+	# Cast the vote
+	try:
+		vote = cast_vote(
+			approval_request_id=approval_id,
+			admin_id=admin.id,
+			vote=payload.vote,
+			comment=payload.comment
+		)
+	except DuplicateVoteError as exc:
+		raise HTTPException(status_code=409, detail=str(exc)) from exc
+	except ApprovalVotingError as exc:
+		raise HTTPException(status_code=500, detail=str(exc)) from exc
+	
+	# Check if we should finalize the decision
+	from db.connect import get_db_connection
+	connection = get_db_connection()
+	
+	try:
+		# Check for rejections (one rejection = final rejection)
+		if payload.vote == 'REJECT':
+			# Update approval request to REJECTED
+			with connection.cursor() as cursor:
+				cursor.execute(
+					"""
+					UPDATE approval_requests
+					SET status = 'REJECTED',
+					    rejection_reason = %s,
+					    updated_at = CURRENT_TIMESTAMP
+					WHERE id = %s::uuid;
+					""",
+					(payload.comment or f"Rejected by {admin.username}", approval_id)
+				)
+				
+				# Update command status
+				cursor.execute(
+					"""
+					UPDATE commands
+					SET status = 'REJECTED',
+					    error_message = %s,
+					    completed_at = CURRENT_TIMESTAMP
+					WHERE id = %s::uuid;
+					""",
+					(f"Approval rejected by {admin.username}", approval_req.command_id)
+				)
+			connection.commit()
+			
+			# Send notification to requester
+			try:
+				# Get requester info
+				with connection.cursor() as cursor:
+					cursor.execute(
+						"""
+						SELECT u.notification_email, u.username, c.command_text
+						FROM users u
+						JOIN commands c ON c.user_id = u.id
+						WHERE u.id = %s::uuid AND c.id = %s::uuid;
+						""",
+						(approval_req.requested_by, approval_req.command_id)
+					)
+					req_info = cursor.fetchone()
+				
+				if req_info and req_info[0]:
+					send_approval_decision_email(
+						to_email=req_info[0],
+						command_text=req_info[2],
+						approved=False,
+						decided_by=admin.username,
+						rejection_reason=payload.comment
+					)
+			except Exception as email_exc:
+				print(f"Warning: Failed to send rejection email: {email_exc}")
+		
+		else:  # APPROVE vote
+			# Check if threshold is met
+			threshold_met, current, required = check_threshold_met(approval_id)
+			
+			if threshold_met:
+				# Update approval request to APPROVED
+				with connection.cursor() as cursor:
+					cursor.execute(
+						"""
+						UPDATE approval_requests
+						SET status = 'APPROVED',
+						    updated_at = CURRENT_TIMESTAMP
+						WHERE id = %s::uuid;
+						""",
+						(approval_id,)
+					)
+					
+					# Execute the command (simulate execution)
+					cursor.execute(
+						"""
+						SELECT command_text, user_id FROM commands WHERE id = %s::uuid;
+						""",
+						(approval_req.command_id,)
+					)
+					cmd_info = cursor.fetchone()
+					command_text = cmd_info[0]
+					user_id = cmd_info[1]
+					
+					simulated_output = f"[SIMULATED] Command '{command_text}' approved and would execute here"
+					
+					# Update command to EXECUTED
+					cursor.execute(
+						"""
+						UPDATE commands
+						SET status = 'EXECUTED',
+						    credits_used = 1,
+						    output = %s,
+						    completed_at = CURRENT_TIMESTAMP
+						WHERE id = %s::uuid;
+						""",
+						(simulated_output, approval_req.command_id)
+					)
+					
+					# Deduct credit
+					cursor.execute(
+						"""
+						UPDATE users
+						SET credit_balance = credit_balance - 1
+						WHERE id = %s::uuid;
+						""",
+						(user_id,)
+					)
+				connection.commit()
+				
+				# Send notification to requester
+				try:
+					with connection.cursor() as cursor:
+						cursor.execute(
+							"""
+							SELECT notification_email, username FROM users WHERE id = %s::uuid;
+							""",
+							(approval_req.requested_by,)
+						)
+						req_info = cursor.fetchone()
+					
+					if req_info and req_info[0]:
+						send_approval_decision_email(
+							to_email=req_info[0],
+							command_text=command_text,
+							approved=True,
+							decided_by=f"{current} admin(s)"
+						)
+				except Exception as email_exc:
+					print(f"Warning: Failed to send approval email: {email_exc}")
+	
+	finally:
+		connection.close()
+	
+	return ApprovalVoteResponse(
+		id=vote.id,
+		approval_request_id=vote.approval_request_id,
+		admin_id=vote.admin_id,
+		admin_username=admin.username,
+		vote=vote.vote,
+		comment=vote.comment,
+		created_at=vote.created_at,
+	)
+
+
+@app.get("/approvals/{approval_id}/votes", response_model=List[ApprovalVoteResponse])
+def list_approval_votes(
+	approval_id: str,
+	_admin: CreatedUser = Depends(require_admin)
+) -> List[ApprovalVoteResponse]:
+	"""List all votes for an approval request (admin only)."""
+	try:
+		votes = get_votes_for_request(approval_id)
+	except ApprovalVotingError as exc:
+		raise HTTPException(status_code=500, detail=str(exc)) from exc
+	
+	# Get usernames for voters
+	from db.connect import get_db_connection
+	connection = get_db_connection()
+	try:
+		with connection.cursor() as cursor:
+			cursor.execute(
+				"""
+				SELECT u.id::text, u.username
+				FROM users u
+				JOIN approval_votes v ON v.admin_id = u.id
+				WHERE v.approval_request_id = %s::uuid;
+				""",
+				(approval_id,)
+			)
+			username_map = {row[0]: row[1] for row in cursor.fetchall()}
+	finally:
+		connection.close()
+	
+	return [
+		ApprovalVoteResponse(
+			id=vote.id,
+			approval_request_id=vote.approval_request_id,
+			admin_id=vote.admin_id,
+			admin_username=username_map.get(vote.admin_id),
+			vote=vote.vote,
+			comment=vote.comment,
+			created_at=vote.created_at,
+		)
+		for vote in votes
+	]
 
 
 if __name__ == "__main__":

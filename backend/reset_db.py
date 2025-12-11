@@ -30,6 +30,9 @@ def reset_database():
             cursor.execute("DROP TABLE IF EXISTS rule_conflicts CASCADE;")
             print("  - Dropped rule_conflicts")
             
+            cursor.execute("DROP TABLE IF EXISTS approval_votes CASCADE;")
+            print("  - Dropped approval_votes")
+            
             cursor.execute("DROP TABLE IF EXISTS approval_requests CASCADE;")
             print("  - Dropped approval_requests")
             

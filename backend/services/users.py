@@ -20,6 +20,7 @@ class CreatedUser:
     id: str
     username: str
     role: str
+    user_tier: str
     credit_balance: int
     is_active: bool
 
@@ -52,7 +53,12 @@ def _hash_api_key(api_key: str) -> str:
     return hashlib.sha256(api_key.encode("utf-8")).hexdigest()
 
 
-def create_user(username: str, email: Optional[str] = None, role: str | None = None) -> Tuple[CreatedUser, str]:
+def create_user(
+    username: str, 
+    email: Optional[str] = None, 
+    role: str | None = None,
+    user_tier: str = "junior"
+) -> Tuple[CreatedUser, str]:
 
     api_key_plain = _generate_api_key()
     api_key_hash = _hash_api_key(api_key_plain)
@@ -63,14 +69,16 @@ def create_user(username: str, email: Optional[str] = None, role: str | None = N
             cursor.execute("SELECT COUNT(*) FROM users;")
             is_first_user = cursor.fetchone()[0] == 0
             target_role = "admin" if is_first_user else (role or "member")
+            # First user is always lead tier
+            target_tier = "lead" if is_first_user else user_tier
 
             cursor.execute(
                 """
-                INSERT INTO users (username, email, api_key, role, notification_email)
-                VALUES (%s, %s, %s, %s, %s)
-                RETURNING id::text, username, role, credit_balance, is_active;
+                INSERT INTO users (username, email, api_key, role, user_tier, notification_email)
+                VALUES (%s, %s, %s, %s, %s, %s)
+                RETURNING id::text, username, role, user_tier, credit_balance, is_active;
                 """,
-                (username, email, api_key_hash, target_role, email),
+                (username, email, api_key_hash, target_role, target_tier, email),
             )
             record = cursor.fetchone()
 
@@ -92,8 +100,9 @@ def create_user(username: str, email: Optional[str] = None, role: str | None = N
         id=record[0],
         username=record[1],
         role=record[2],
-        credit_balance=record[3],
-        is_active=record[4],
+        user_tier=record[3],
+        credit_balance=record[4],
+        is_active=record[5],
     )
 
     return created_user, api_key_plain
@@ -108,7 +117,7 @@ def get_user_by_api_key(api_key: str) -> Optional[CreatedUser]:
         with connection.cursor() as cursor:
             cursor.execute(
                 """
-                SELECT id::text, username, role, credit_balance, is_active
+                SELECT id::text, username, role, user_tier, credit_balance, is_active
                 FROM users
                 WHERE api_key = %s;
                 """,
@@ -127,8 +136,9 @@ def get_user_by_api_key(api_key: str) -> Optional[CreatedUser]:
         id=record[0],
         username=record[1],
         role=record[2],
-        credit_balance=record[3],
-        is_active=record[4],
+        user_tier=record[3],
+        credit_balance=record[4],
+        is_active=record[5],
     )
 
 
@@ -143,7 +153,7 @@ def get_user_by_username(username: str) -> Optional[Tuple[CreatedUser, str]]:
         with connection.cursor() as cursor:
             cursor.execute(
                 """
-                SELECT id::text, username, role, credit_balance, is_active, api_key
+                SELECT id::text, username, role, user_tier, credit_balance, is_active, api_key
                 FROM users
                 WHERE username = %s;
                 """,
@@ -162,8 +172,9 @@ def get_user_by_username(username: str) -> Optional[Tuple[CreatedUser, str]]:
         id=record[0],
         username=record[1],
         role=record[2],
-        credit_balance=record[3],
-        is_active=record[4],
+        user_tier=record[3],
+        credit_balance=record[4],
+        is_active=record[5],
     )
     
     # Generate a new API key for this session
@@ -190,3 +201,31 @@ def get_user_by_username(username: str) -> Optional[Tuple[CreatedUser, str]]:
         connection.close()
     
     return user, api_key_plain
+
+
+def get_all_admin_emails() -> List[str]:
+    """Get email addresses of all active admins with notification_email set.
+    
+    Returns:
+        List of admin email addresses
+    """
+    connection = get_db_connection()
+    try:
+        with connection.cursor() as cursor:
+            cursor.execute(
+                """
+                SELECT notification_email
+                FROM users
+                WHERE role = 'admin' 
+                  AND is_active = TRUE 
+                  AND notification_email IS NOT NULL
+                  AND notification_email != '';
+                """
+            )
+            records = cursor.fetchall()
+    except psycopg2.Error as exc:
+        raise UserLookupError("Failed to fetch admin emails") from exc
+    finally:
+        connection.close()
+    
+    return [record[0] for record in records]

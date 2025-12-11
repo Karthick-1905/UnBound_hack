@@ -14,6 +14,7 @@ class UserCreateRequest(BaseModel):
 
     username: UsernameType
     email: Optional[str] = None
+    user_tier: Optional[str] = Field(default="junior", pattern="^(junior|mid|senior|lead)$")
 
 
 class UserCreateResponse(BaseModel):
@@ -32,6 +33,7 @@ class UserProfileResponse(BaseModel):
     id: str
     username: str
     role: str
+    user_tier: str
     credit_balance: int
 
 
@@ -42,6 +44,8 @@ class RuleCreateRequest(BaseModel):
     pattern: str = Field(..., min_length=1, max_length=1000)
     action: str = Field(..., pattern="^(AUTO_ACCEPT|AUTO_REJECT|NEEDS_APPROVAL)$")
     description: Optional[str] = Field(None, max_length=255)
+    approval_threshold: Optional[int] = Field(default=1, ge=1, le=10)
+    user_tier_thresholds: Optional[dict] = Field(default={"junior": 3, "mid": 2, "senior": 1, "lead": 1})
 
 
 class RuleUpdateRequest(BaseModel):
@@ -51,6 +55,8 @@ class RuleUpdateRequest(BaseModel):
     action: Optional[str] = Field(None, pattern="^(AUTO_ACCEPT|AUTO_REJECT|NEEDS_APPROVAL)$")
     description: Optional[str] = Field(None, max_length=255)
     is_active: Optional[bool] = None
+    approval_threshold: Optional[int] = Field(None, ge=1, le=10)
+    user_tier_thresholds: Optional[dict] = None
 
 
 class RuleResponse(BaseModel):
@@ -60,6 +66,8 @@ class RuleResponse(BaseModel):
     pattern: str
     action: str
     description: Optional[str]
+    approval_threshold: int
+    user_tier_thresholds: dict
     created_at: str
     updated_at: str
     is_active: bool
@@ -109,4 +117,40 @@ class AuditLogResponse(BaseModel):
     metadata: Optional[str]
     ip_address: Optional[str]
     user_agent: Optional[str]
+    created_at: str
+
+
+# Approval models
+class ApprovalRequestResponse(BaseModel):
+    """Response containing approval request data."""
+
+    id: str
+    command_id: str
+    requested_by: str
+    required_approvals: int
+    current_approvals: int
+    status: str
+    rejection_reason: Optional[str]
+    notified_at: Optional[str]
+    expires_at: str
+    created_at: str
+    updated_at: str
+
+
+class ApprovalVoteRequest(BaseModel):
+    """Request to cast an approval vote."""
+
+    vote: str = Field(..., pattern="^(APPROVE|REJECT)$")
+    comment: Optional[str] = Field(None, max_length=500)
+
+
+class ApprovalVoteResponse(BaseModel):
+    """Response containing approval vote data."""
+
+    id: str
+    approval_request_id: str
+    admin_id: str
+    admin_username: Optional[str] = None
+    vote: str
+    comment: Optional[str]
     created_at: str

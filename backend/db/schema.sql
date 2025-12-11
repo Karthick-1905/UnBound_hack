@@ -4,6 +4,7 @@ CREATE TABLE users (
     email VARCHAR(100),
     api_key VARCHAR(64) UNIQUE NOT NULL, 
     role VARCHAR(10) NOT NULL CHECK (role IN ('admin', 'member')),
+    user_tier VARCHAR(20) NOT NULL DEFAULT 'junior' CHECK (user_tier IN ('junior', 'mid', 'senior', 'lead')),
     credit_balance INTEGER NOT NULL DEFAULT 100,
     notification_email VARCHAR(100),
     telegram_chat_id VARCHAR(50),
@@ -15,18 +16,22 @@ CREATE TABLE users (
 CREATE INDEX idx_users_api_key ON users(api_key);
 CREATE INDEX idx_users_role ON users(role);
 CREATE INDEX idx_users_email ON users(email) WHERE email IS NOT NULL;
+CREATE INDEX idx_users_tier ON users(user_tier);
 
 CREATE TABLE rules (
     id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
     pattern TEXT NOT NULL,
     action VARCHAR(20) NOT NULL CHECK (action IN ('AUTO_ACCEPT', 'AUTO_REJECT', 'NEEDS_APPROVAL')),
     description VARCHAR(255),
+    approval_threshold INTEGER DEFAULT 1 CHECK (approval_threshold >= 1),
+    user_tier_thresholds JSONB DEFAULT '{"junior": 3, "mid": 2, "senior": 1, "lead": 1}'::jsonb,
     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
     updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
     is_active BOOLEAN DEFAULT TRUE
 );
 
 CREATE INDEX idx_rules_active ON rules(is_active) WHERE is_active = TRUE;
+CREATE INDEX idx_rules_action ON rules(action) WHERE action = 'NEEDS_APPROVAL';
 
 CREATE TABLE commands (
     id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
@@ -76,9 +81,9 @@ CREATE TABLE approval_requests (
     id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
     command_id UUID NOT NULL REFERENCES commands(id) ON DELETE CASCADE,
     requested_by UUID NOT NULL REFERENCES users(id),
+    required_approvals INTEGER NOT NULL DEFAULT 1,
+    current_approvals INTEGER NOT NULL DEFAULT 0,
     status VARCHAR(20) NOT NULL DEFAULT 'PENDING' CHECK (status IN ('PENDING', 'APPROVED', 'REJECTED', 'EXPIRED')),
-    approved_by UUID REFERENCES users(id),
-    approved_at TIMESTAMP,
     rejection_reason TEXT,
     notified_at TIMESTAMP,
     expires_at TIMESTAMP DEFAULT (CURRENT_TIMESTAMP + INTERVAL '24 hours'),
@@ -90,6 +95,19 @@ CREATE INDEX idx_approval_status ON approval_requests(status);
 CREATE INDEX idx_approval_requested_by ON approval_requests(requested_by);
 CREATE INDEX idx_approval_command_id ON approval_requests(command_id);
 CREATE INDEX idx_approval_expires_at ON approval_requests(expires_at) WHERE status = 'PENDING';
+
+CREATE TABLE approval_votes (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    approval_request_id UUID NOT NULL REFERENCES approval_requests(id) ON DELETE CASCADE,
+    admin_id UUID NOT NULL REFERENCES users(id),
+    vote VARCHAR(10) NOT NULL CHECK (vote IN ('APPROVE', 'REJECT')),
+    comment TEXT,
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    UNIQUE(approval_request_id, admin_id)
+);
+
+CREATE INDEX idx_approval_votes_request ON approval_votes(approval_request_id);
+CREATE INDEX idx_approval_votes_admin ON approval_votes(admin_id);
 
 CREATE TABLE rule_conflicts (
     id UUID PRIMARY KEY DEFAULT gen_random_uuid(),

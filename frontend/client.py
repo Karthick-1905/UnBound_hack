@@ -82,13 +82,19 @@ def create_rule(
     cfg: CLIConfig,
     pattern: str,
     action: str,
-    description: Optional[str] = None
+    description: Optional[str] = None,
+    approval_threshold: Optional[int] = None,
+    user_tier_thresholds: Optional[Dict[str, int]] = None
 ) -> Dict[str, Any]:
     """Create a new rule (admin only)."""
     url = f"{cfg.base_url.rstrip('/')}/rules"
     payload = {"pattern": pattern, "action": action}
     if description:
         payload["description"] = description
+    if approval_threshold is not None:
+        payload["approval_threshold"] = approval_threshold
+    if user_tier_thresholds is not None:
+        payload["user_tier_thresholds"] = user_tier_thresholds
     
     resp = httpx.post(url, headers=_get_headers(cfg), json=payload, timeout=10.0)
     
@@ -252,6 +258,80 @@ def list_audit_logs(
 def get_audit_log(cfg: CLIConfig, log_id: str) -> Dict[str, Any]:
     """Get a specific audit log by ID (admin only)."""
     url = f"{cfg.base_url.rstrip('/')}/audit/{log_id}"
+    resp = httpx.get(url, headers=_get_headers(cfg), timeout=10.0)
+    
+    if resp.status_code != 200:
+        try:
+            detail = resp.json().get("detail", resp.text)
+        except Exception:
+            detail = resp.text
+        raise BackendError(resp.status_code, detail)
+    
+    return resp.json()
+
+
+# Approval API calls
+def list_approvals(cfg: CLIConfig, status: Optional[str] = None, limit: int = 50) -> List[Dict[str, Any]]:
+    """List approval requests (admin only)."""
+    url = f"{cfg.base_url.rstrip('/')}/approvals"
+    params = {"limit": limit}
+    if status:
+        params["status"] = status
+    
+    resp = httpx.get(url, headers=_get_headers(cfg), params=params, timeout=10.0)
+    
+    if resp.status_code != 200:
+        try:
+            detail = resp.json().get("detail", resp.text)
+        except Exception:
+            detail = resp.text
+        raise BackendError(resp.status_code, detail)
+    
+    return resp.json()
+
+
+def get_approval(cfg: CLIConfig, approval_id: str) -> Dict[str, Any]:
+    """Get a specific approval request (admin only)."""
+    url = f"{cfg.base_url.rstrip('/')}/approvals/{approval_id}"
+    resp = httpx.get(url, headers=_get_headers(cfg), timeout=10.0)
+    
+    if resp.status_code != 200:
+        try:
+            detail = resp.json().get("detail", resp.text)
+        except Exception:
+            detail = resp.text
+        raise BackendError(resp.status_code, detail)
+    
+    return resp.json()
+
+
+def vote_on_approval(
+    cfg: CLIConfig,
+    approval_id: str,
+    vote: str,
+    comment: Optional[str] = None
+) -> Dict[str, Any]:
+    """Cast a vote on an approval request (admin only)."""
+    url = f"{cfg.base_url.rstrip('/')}/approvals/{approval_id}/vote"
+    payload = {"vote": vote}
+    if comment:
+        payload["comment"] = comment
+    
+    resp = httpx.post(url, headers=_get_headers(cfg), json=payload, timeout=10.0)
+    
+    if resp.status_code != 200:
+        try:
+            detail = resp.json().get("detail", resp.text)
+        except Exception:
+            detail = resp.text
+        raise BackendError(resp.status_code, detail)
+    
+    return resp.json()
+
+
+def list_approval_votes(cfg: CLIConfig, approval_id: str) -> List[Dict[str, Any]]:
+    """List all votes for an approval request (admin only)."""
+    url = f"{cfg.base_url.rstrip('/')}/approvals/{approval_id}/votes"
     resp = httpx.get(url, headers=_get_headers(cfg), timeout=10.0)
     
     if resp.status_code != 200:

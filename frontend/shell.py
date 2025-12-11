@@ -196,6 +196,13 @@ to the backend for evaluation and execution.
             profile = get_user_profile(self.cfg)
             self.console.print(f"[cyan]Username:[/cyan] {profile['username']}")
             self.console.print(f"[cyan]Role:[/cyan] {profile['role']}")
+            
+            # Display user tier with explanation
+            tier = profile.get('user_tier', 'junior')
+            tier_approvals = {'junior': 3, 'mid': 2, 'senior': 1, 'lead': 1}
+            required = tier_approvals.get(tier, 3)
+            self.console.print(f"[cyan]Tier:[/cyan] {tier} [dim](requires {required} approval{'s' if required > 1 else ''})[/dim]")
+            
             self.console.print(f"[cyan]Credits:[/cyan] {profile['credit_balance']}")
             self._update_prompt()
         except BackendError as exc:
@@ -238,23 +245,49 @@ to the backend for evaluation and execution.
             self.console.print(f"[red]Failed to list rules: {exc.detail}[/red]")
 
     def do_rules_add(self, args):
-        """Add a new rule. Usage: rules_add <pattern> <action> [description]
+        """Add a new rule. Usage: rules_add <pattern> <action> [description] [--threshold N] [--tier-thresholds "junior:3,mid:2,senior:1,lead:1"]
         
         Example: rules_add "^sudo" AUTO_REJECT "Block sudo commands"
+        Example: rules_add "^docker" NEEDS_APPROVAL "Requires approval" --threshold 2
+        Example: rules_add "^systemctl" NEEDS_APPROVAL "Service control" --tier-thresholds "junior:3,mid:2,senior:1"
         """
         if not self.cfg.api_key:
             self.console.print("[red]Not authenticated.[/red]")
             return
 
-        parts = args.split(maxsplit=2)
+        parts = args.split()
         if len(parts) < 2:
-            self.console.print("[red]Usage: rules_add <pattern> <action> [description][/red]")
+            self.console.print("[red]Usage: rules_add <pattern> <action> [description] [--threshold N] [--tier-thresholds \"...\"][/red]")
             self.console.print("[dim]Example: rules_add \"^sudo\" AUTO_REJECT \"Block sudo\"[/dim]")
             return
 
         pattern = parts[0].strip('"\'')
-        action = parts[1].upper()
-        description = parts[2].strip('"\'') if len(parts) > 2 else None
+        action = parts[1].upper().strip('"\'')
+        
+        # Parse optional description and flags
+        description = None
+        approval_threshold = None
+        user_tier_thresholds = None
+        i = 2
+        
+        while i < len(parts):
+            if parts[i] == "--threshold" and i + 1 < len(parts):
+                approval_threshold = int(parts[i + 1])
+                i += 2
+            elif parts[i] == "--tier-thresholds" and i + 1 < len(parts):
+                # Parse "junior:3,mid:2,senior:1,lead:1" format
+                tier_str = parts[i + 1].strip('"\'')
+                user_tier_thresholds = {}
+                for pair in tier_str.split(','):
+                    tier, threshold = pair.split(':')
+                    user_tier_thresholds[tier.strip()] = int(threshold.strip())
+                i += 2
+            elif not parts[i].startswith('--'):
+                # It's the description
+                description = parts[i].strip('"\'')
+                i += 1
+            else:
+                i += 1
 
         valid_actions = {"AUTO_ACCEPT", "AUTO_REJECT", "NEEDS_APPROVAL"}
         if action not in valid_actions:
@@ -262,11 +295,23 @@ to the backend for evaluation and execution.
             return
 
         try:
-            rule = create_rule_api(self.cfg, pattern, action, description)
+            rule = create_rule_api(
+                self.cfg, 
+                pattern, 
+                action, 
+                description, 
+                approval_threshold=approval_threshold,
+                user_tier_thresholds=user_tier_thresholds
+            )
             self.console.print("[green]✓ Rule created successfully![/green]")
             self.console.print(f"[dim]ID: {rule['id']}[/dim]")
             self.console.print(f"Pattern: {rule['pattern']}")
             self.console.print(f"Action: {rule['action']}")
+            
+            if rule.get('approval_threshold'):
+                self.console.print(f"[dim]Approval Threshold: {rule['approval_threshold']}[/dim]")
+            if rule.get('user_tier_thresholds'):
+                self.console.print(f"[dim]User Tier Thresholds: {rule['user_tier_thresholds']}[/dim]")
             
         except BackendError as exc:
             self.console.print(f"[red]Failed to create rule: {exc.detail}[/red]")
@@ -593,6 +638,173 @@ to the backend for evaluation and execution.
         except BackendError as exc:
             self.console.print(f"[red]Failed to get audit log: {exc.detail}[/red]")
 
+    def do_approvals_list(self, args):
+        """List approval requests. Usage: approvals_list [--status PENDING|APPROVED|REJECTED] [--limit 50]"""
+        if not self.cfg.api_key:
+            self.console.print("[red]Not authenticated.[/red]")
+            return
+
+        parts = args.split()
+        status = None
+        limit = 50
+        
+        i = 0
+        while i < len(parts):
+            if parts[i] == "--status" and i + 1 < len(parts):
+                status = parts[i + 1].upper()
+                i += 2
+            elif parts[i] == "--limit" and i + 1 < len(parts):
+                limit = int(parts[i + 1])
+                i += 2
+            else:
+                i += 1
+        
+        try:
+            from client import list_approvals as list_approvals_api
+            approvals = list_approvals_api(self.cfg, status=status, limit=limit)
+            
+            if not approvals:
+                self.console.print("[yellow]No approval requests found.[/yellow]")
+                return
+            
+            table = Table(title=f"Approval Requests ({len(approvals)})")
+            table.add_column("ID", style="cyan", no_wrap=True)
+            table.add_column("Command ID", style="white")
+            table.add_column("Status", style="yellow")
+            table.add_column("Approvals", style="green")
+            table.add_column("Expires", style="magenta")
+            
+            for approval in approvals:
+                approval_id_short = approval['id'][:8]
+                command_id_short = approval['command_id'][:8]
+                status_display = approval['status']
+                approvals_display = f"{approval['current_approvals']}/{approval['required_approvals']}"
+                expires_at = approval['expires_at'][:19] if approval['expires_at'] else "N/A"
+                
+                table.add_row(
+                    approval_id_short,
+                    command_id_short,
+                    status_display,
+                    approvals_display,
+                    expires_at
+                )
+            
+            self.console.print(table)
+            
+        except BackendError as exc:
+            self.console.print(f"[red]Failed to list approvals: {exc.detail}[/red]")
+
+    def do_approvals_vote(self, args):
+        """Vote on an approval request. Usage: approvals_vote <approval_id> APPROVE|REJECT [comment]"""
+        if not self.cfg.api_key:
+            self.console.print("[red]Not authenticated.[/red]")
+            return
+
+        parts = args.split(maxsplit=2)
+        if len(parts) < 2:
+            self.console.print("[red]Usage: approvals_vote <approval_id> APPROVE|REJECT [comment][/red]")
+            return
+        
+        approval_id = parts[0]
+        vote = parts[1].upper()
+        comment = parts[2] if len(parts) > 2 else None
+        
+        if vote not in ('APPROVE', 'REJECT'):
+            self.console.print("[red]Vote must be APPROVE or REJECT[/red]")
+            return
+        
+        try:
+            from client import vote_on_approval as vote_on_approval_api
+            result = vote_on_approval_api(self.cfg, approval_id, vote, comment)
+            
+            vote_emoji = "✅" if vote == "APPROVE" else "❌"
+            self.console.print(f"[green]{vote_emoji} Vote cast: {vote}[/green]")
+            
+            if comment:
+                self.console.print(f"[dim]Comment: {comment}[/dim]")
+            
+        except BackendError as exc:
+            self.console.print(f"[red]Failed to vote: {exc.detail}[/red]")
+
+    def do_approvals_votes(self, args):
+        """List votes for an approval request. Usage: approvals_votes <approval_id>"""
+        if not self.cfg.api_key:
+            self.console.print("[red]Not authenticated.[/red]")
+            return
+
+        approval_id = args.strip()
+        if not approval_id:
+            self.console.print("[red]Usage: approvals_votes <approval_id>[/red]")
+            return
+        
+        try:
+            from client import list_approval_votes as list_approval_votes_api
+            votes = list_approval_votes_api(self.cfg, approval_id)
+            
+            if not votes:
+                self.console.print("[yellow]No votes yet for this approval request.[/yellow]")
+                return
+            
+            table = Table(title=f"Votes for Approval {approval_id[:8]}")
+            table.add_column("Admin", style="cyan")
+            table.add_column("Vote", style="yellow")
+            table.add_column("Comment", style="white")
+            table.add_column("Time", style="magenta")
+            
+            for vote in votes:
+                vote_emoji = "✅" if vote['vote'] == 'APPROVE' else "❌"
+                vote_display = f"{vote_emoji} {vote['vote']}"
+                admin_name = vote.get('admin_username', vote['admin_id'][:8])
+                comment_text = vote.get('comment', '')[:50] if vote.get('comment') else '-'
+                created_at = vote['created_at'][:19]
+                
+                table.add_row(
+                    admin_name,
+                    vote_display,
+                    comment_text,
+                    created_at
+                )
+            
+            self.console.print(table)
+            
+        except BackendError as exc:
+            self.console.print(f"[red]Failed to list votes: {exc.detail}[/red]")
+
+    def do_approvals_info(self, args):
+        """Get detailed info about an approval request. Usage: approvals_info <approval_id>"""
+        if not self.cfg.api_key:
+            self.console.print("[red]Not authenticated.[/red]")
+            return
+
+        approval_id = args.strip()
+        if not approval_id:
+            self.console.print("[red]Usage: approvals_info <approval_id>[/red]")
+            return
+        
+        try:
+            from client import get_approval as get_approval_api
+            approval = get_approval_api(self.cfg, approval_id)
+            
+            table = Table(title="Approval Request Details")
+            table.add_column("Field", style="cyan", no_wrap=True)
+            table.add_column("Value", style="white")
+            
+            table.add_row("ID", approval['id'])
+            table.add_row("Command ID", approval['command_id'])
+            table.add_row("Requested By", approval['requested_by'])
+            table.add_row("Status", approval['status'])
+            table.add_row("Required Approvals", str(approval['required_approvals']))
+            table.add_row("Current Approvals", str(approval['current_approvals']))
+            table.add_row("Expires At", approval['expires_at'][:19] if approval['expires_at'] else 'N/A')
+            table.add_row("Created At", approval['created_at'][:19])
+            
+            if approval.get('rejection_reason'):
+                table.add_row("Rejection Reason", approval['rejection_reason'])
+            
+            self.console.print(table)
+            
+        except BackendError as exc:
+            self.console.print(f"[red]Failed to get approval info: {exc.detail}[/red]")
 
 
     # Shortcuts
@@ -603,6 +815,7 @@ to the backend for evaluation and execution.
     do_s = do_status
     do_su = do_switch_user
     do_a = do_audit_list
+    do_appr = do_approvals_list
 
 
 def main():

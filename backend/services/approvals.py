@@ -18,14 +18,26 @@ class ApprovalRequest:
     id: str
     command_id: str
     requested_by: str
+    required_approvals: int
+    current_approvals: int
     status: str
-    approved_by: Optional[str]
-    approved_at: Optional[str]
     rejection_reason: Optional[str]
     notified_at: Optional[str]
     expires_at: str
     created_at: str
     updated_at: str
+
+
+@dataclass(frozen=True)
+class ApprovalVote:
+    """Represents an approval vote from an admin."""
+
+    id: str
+    approval_request_id: str
+    admin_id: str
+    vote: str  # 'APPROVE' or 'REJECT'
+    comment: Optional[str]
+    created_at: str
 
 
 class ApprovalRequestError(Exception):
@@ -44,12 +56,17 @@ class InvalidApprovalActionError(ApprovalRequestError):
     """Raised when trying to approve/reject an already processed request."""
 
 
-def create_approval_request(command_id: str, requested_by: str) -> ApprovalRequest:
+def create_approval_request(
+    command_id: str, 
+    requested_by: str,
+    required_approvals: int = 1
+) -> ApprovalRequest:
     """Create a new approval request for a command.
     
     Args:
         command_id: UUID of the command needing approval
         requested_by: UUID of the user who submitted the command
+        required_approvals: Number of admin approvals required
         
     Returns:
         Created ApprovalRequest object
@@ -64,13 +81,13 @@ def create_approval_request(command_id: str, requested_by: str) -> ApprovalReque
             cursor.execute(
                 """
                 INSERT INTO approval_requests 
-                (command_id, requested_by, status)
-                VALUES (%s::uuid, %s::uuid, 'PENDING')
-                RETURNING id::text, command_id::text, requested_by::text, status,
-                          approved_by::text, approved_at::text, rejection_reason, 
+                (command_id, requested_by, required_approvals, status)
+                VALUES (%s::uuid, %s::uuid, %s, 'PENDING')
+                RETURNING id::text, command_id::text, requested_by::text, required_approvals,
+                          current_approvals, status, rejection_reason, 
                           notified_at::text, expires_at::text, created_at::text, updated_at::text;
                 """,
-                (command_id, requested_by),
+                (command_id, requested_by, required_approvals),
             )
             record = cursor.fetchone()
         connection.commit()
@@ -84,9 +101,9 @@ def create_approval_request(command_id: str, requested_by: str) -> ApprovalReque
         id=record[0],
         command_id=record[1],
         requested_by=record[2],
-        status=record[3],
-        approved_by=record[4],
-        approved_at=record[5],
+        required_approvals=record[3],
+        current_approvals=record[4],
+        status=record[5],
         rejection_reason=record[6],
         notified_at=record[7],
         expires_at=record[8],
@@ -147,8 +164,8 @@ def list_approval_requests(
     try:
         with connection.cursor() as cursor:
             query = """
-                SELECT id::text, command_id::text, requested_by::text, status,
-                       approved_by::text, approved_at::text, rejection_reason, 
+                SELECT id::text, command_id::text, requested_by::text, required_approvals,
+                       current_approvals, status, rejection_reason, 
                        notified_at::text, expires_at::text, created_at::text, updated_at::text
                 FROM approval_requests
                 WHERE 1=1
@@ -178,9 +195,9 @@ def list_approval_requests(
             id=record[0],
             command_id=record[1],
             requested_by=record[2],
-            status=record[3],
-            approved_by=record[4],
-            approved_at=record[5],
+            required_approvals=record[3],
+            current_approvals=record[4],
+            status=record[5],
             rejection_reason=record[6],
             notified_at=record[7],
             expires_at=record[8],
@@ -209,8 +226,8 @@ def get_approval_request_by_id(approval_request_id: str) -> Optional[ApprovalReq
         with connection.cursor() as cursor:
             cursor.execute(
                 """
-                SELECT id::text, command_id::text, requested_by::text, status,
-                       approved_by::text, approved_at::text, rejection_reason, 
+                SELECT id::text, command_id::text, requested_by::text, required_approvals,
+                       current_approvals, status, rejection_reason, 
                        notified_at::text, expires_at::text, created_at::text, updated_at::text
                 FROM approval_requests
                 WHERE id = %s::uuid;
@@ -230,9 +247,9 @@ def get_approval_request_by_id(approval_request_id: str) -> Optional[ApprovalReq
         id=record[0],
         command_id=record[1],
         requested_by=record[2],
-        status=record[3],
-        approved_by=record[4],
-        approved_at=record[5],
+        required_approvals=record[3],
+        current_approvals=record[4],
+        status=record[5],
         rejection_reason=record[6],
         notified_at=record[7],
         expires_at=record[8],
